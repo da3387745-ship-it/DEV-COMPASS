@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.log
+node_modules/
+frontend/dist/
+backend/data/raw/*
+!backend/data/raw/.gitkeep
+backend/storage/chroma/

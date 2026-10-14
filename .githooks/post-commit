@@ -1,0 +1,14 @@
+#!/bin/sh
+
+branch=$(git symbolic-ref --quiet --short HEAD) || {
+  printf '%s\n' 'Automatic push skipped: the current branch could not be determined.' >&2
+  exit 1
+}
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+  printf '%s\n' 'Automatic push failed: no origin remote is configured.' \
+    'Create or connect the GitHub repository, then commit again or run git push.' >&2
+  exit 1
+fi
+
+git push --set-upstream origin "$branch"

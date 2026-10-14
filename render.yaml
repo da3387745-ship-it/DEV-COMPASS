@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: devcompass
+    runtime: python
+    plan: starter
+    buildCommand: npm ci --prefix frontend && npm run build --prefix frontend && pip install -r other/requirements.txt
+    startCommand: uvicorn backend.bridge:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: devcompass-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: DEVCOMPASS_RAW_DIR
+        value: /var/data/raw
+      - key: DEVCOMPASS_CHROMA_DIR
+        value: /var/data/chroma
+      - key: DEVCOMPASS_COOKIE_SECURE
+        value: "1"
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DATABASE
+        value: devcompass
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
