@@ -19,9 +19,9 @@ Browser
        v
 FastAPI (127.0.0.1:8000)
   backend/bridge.py
-       |-- MongoDB Atlas: users, sessions, chat, activity, document metadata
-       |-- Local files: backend/data/raw/<account-id>/
-       |-- ChromaDB: backend/storage/chroma/
+       |-- MongoDB Atlas: accounts, chat, metadata, document chunks + vectors
+       |-- Local files: legacy documents under backend/data/raw/
+       |-- ChromaDB: temporary local mirror during Atlas verification
        |-- Sentence Transformers: local text embeddings
        `-- Gemini -> Groq -> OpenRouter: configured LLM fallback
 
@@ -45,7 +45,6 @@ DEV-COMPASS/
 |   `-- post-commit                   Pushes a commit to the configured GitHub remote
 |-- .github/
 |   `-- workflows/ci.yml              Frontend build and backend tests on push/PR
-|-- problems.md                       Project issue and troubleshooting history
 |-- render.yaml                       Render deployment configuration
 |-- frontend/
 |   |-- index.html                    SPA document shell
@@ -60,8 +59,8 @@ DEV-COMPASS/
 |   |-- __init__.py                   Makes backend importable by Uvicorn/tests
 |   |-- bridge.py                     FastAPI routes, MongoDB, RAG, and model calls
 |   |-- check_mongodb_connection.py   Safe standalone MongoDB ping, used by tests
-|   |-- data/raw/                     Uploaded/source files, separated by account
-|   |-- storage/chroma/               Persistent local vector database
+|   |-- data/raw/                     Legacy local source files, separated by account
+|   |-- storage/chroma/               Temporary local vector mirror (migration only)
 `-- other/
     |-- start_app.py                  Starts or reuses the local services
     |-- requirements.txt              Python dependencies
@@ -74,8 +73,8 @@ DEV-COMPASS/
 
 The project is kept in three main folders: `frontend/` for browser code,
 `backend/` for the API and persistent app data, and `other/` for support files,
-tests, and setup. Root-level `README.md`, `problems.md`, `.gitignore`, and
-`render.yaml` stay at the root because they document or configure the project.
+tests, and setup. Root-level `README.md`, `.gitignore`, and `render.yaml` stay at the root because
+they document or configure the project.
 The root `.env` and `.venv` stay outside the source folders so the backend can
 load local secrets and use the existing Python environment. `frontend/dist/`,
 `frontend/node_modules/`, and Python `__pycache__/` directories are generated
@@ -104,9 +103,10 @@ individual JSX components.
    database operations reuse one lazily created PyMongo client, which is closed
    when the API shuts down. Database-status checks use separate short-lived
    clients and close them after the check.
-4. A document is stored on disk and indexed locally. MongoDB holds account and
-   application metadata, chat sessions, and profile pictures; it does not hold
-   uploaded files or Chroma vectors.
+4. New uploads are size-limited, parsed in memory, embedded locally, and indexed
+   in both Atlas Vector Search and Chroma during migration. Atlas stores
+   searchable text chunks, vectors, and per-account metadata; original uploads
+   are not retained on the server.
 5. Chat prompts and retrieved passages are sent from the backend to the first
    configured LLM provider that succeeds. The resulting answer and metadata
    are written to MongoDB.
@@ -134,11 +134,15 @@ Guest document scope is derived from a random HttpOnly cookie on the backend;
 the browser does not choose or receive a workspace/account ID. Authenticated
 document and chat operations use the account resolved from the session cookie.
 
-### Deploy publicly on Render
+### Deploy on Render Free
 
-The root `render.yaml` defines one FastAPI web service that serves both the API
-and frontend, with a persistent disk for uploaded documents and the Chroma
-index. The persistent disk requires a paid Render web-service plan.
+The root `render.yaml` defines a Render Free FastAPI web service that serves
+both the API and frontend. Free services have an ephemeral filesystem and spin
+down when idle; this configuration does not use a persistent disk. New document
+chunks, embeddings, and metadata are stored in Atlas so they survive restarts.
+The service is intended for hobby use, not production availability. The local
+embedding model may exceed free-instance memory limits; monitor deployment
+health and upgrade or use a lower-memory embedding provider if it restarts.
 
 1. Push this project to a GitHub repository that does not contain `.env` or
    other credentials.
@@ -148,8 +152,10 @@ index. The persistent disk requires a paid Render web-service plan.
 3. In MongoDB Atlas, allow the Render service's outbound IP addresses through
    Network Access, and confirm the database user in `MONGODB_URI` has access to
    the configured database.
-4. Deploy the Blueprint. Render provides a public `https://` URL when the
-   service is live; use that URL from any internet-connected browser.
+4. Confirm the Atlas Vector Search index `devcompass_vector` is ready on the
+   `document_chunks` collection, then deploy the Blueprint. Render provides a
+   public `https://` URL when the service is live; use that URL from any
+   internet-connected browser.
 
 The local `other/start_app.py` launcher builds the frontend for development.
 Render builds the same frontend as part of deployment; FastAPI serves its
@@ -165,22 +171,21 @@ events; `index.html` is the static mount point.
 ```text
 Browser file form
   -> POST /upload (multipart/form-data)
-  -> validate PDF/TXT/Markdown name and extension
-  -> save to backend/data/raw/<safe-account-id>/
-  -> extract text (pypdf for PDF; UTF-8 text for TXT/Markdown)
+  -> validate PDF/TXT/Markdown extension and 10 MB limit
+  -> extract text in memory (pypdf for PDF; UTF-8 text for TXT/Markdown)
   -> split into 500-character passages with 50-character overlap
   -> embed passages with Sentence Transformers
-  -> upsert vectors + metadata in persistent ChromaDB
-  -> update MongoDB user_documents and activity (when signed in)
+  -> upsert passage, vector, source, and ownership in Atlas document_chunks
+  -> mirror vectors in local Chroma during migration
+  -> update MongoDB user_documents and activity
 ```
 
-Chroma records include the source name, account ID, document ID, and chunk
-number. Retrieval filters on the account and, when selected, the active
-document. The original files and vector index persist locally under `backend/`.
-New authenticated uploads go into per-account folders. Some existing
-root-level files in `backend/data/raw/` predate account subfolders and belong to
-the default/unscoped workspace; they are not automatically assigned to each
-signed-in account.
+Atlas chunks include the source name, account ID, document ID, chunk number,
+text, and 384-dimensional embedding. The `devcompass_vector` index uses cosine
+similarity and prefilters by `user_id` and `document_id`. New uploads are
+indexed for only the current document; the app does not silently migrate other
+local files. Legacy files under `backend/data/raw/` remain local until
+explicitly re-uploaded or migrated.
 
 #### Question and answer
 
@@ -189,7 +194,8 @@ Chat prompt
   -> POST /ask
   -> choose the account/workspace and response style
   -> route greeting/general chat vs document question
-  -> for document questions: retrieve passages from ChromaDB
+  -> for document questions: retrieve passages from Atlas Vector Search
+       -> use local Chroma only as a temporary fallback during migration
        -> broad file request: select named/active file passages
        -> otherwise: semantic top-5 search, then keyword fallback if needed
   -> construct a context-limited prompt for document answers
@@ -229,7 +235,8 @@ The default database name is `devcompass`; override it with
 | `chat_sessions` | Account ID, editable title, creation/update times |
 | `chat_history` | Account ID, chat ID, ordered question/answer turns, sources, provider, mode |
 | `activity` | Account/workspace ID, event type, title/detail, time |
-| `user_documents` | Account ID, document metadata, indexed chunk count, update time |
+| `user_documents` | Account/workspace ID, document metadata, indexed chunk count, update time |
+| `document_chunks` | Searchable text, 384-dimensional embedding, source and ownership metadata |
 
 ## HTTP API
 
@@ -255,10 +262,10 @@ at `http://127.0.0.1:8000/docs` while running.
 | `PUT` | `/profile` | Save display name and preferences |
 | `GET` | `/dashboard` | Return account counts and recent activity |
 | `GET` | `/chat/history` | Return bounded chat history for the signed-in user |
-| `GET` | `/documents` | List local documents and their indexed chunk counts |
-| `POST` | `/upload` | Save and index a PDF, TXT, or Markdown file |
+| `GET` | `/documents` | List workspace documents from local files and MongoDB metadata |
+| `POST` | `/upload` | Parse and index a PDF, TXT, or Markdown file (up to 10 MB) |
 | `POST` | `/ask` | Answer a general or document-grounded question |
-| `GET` | `/status` | Rebuild the default workspace index and report RAG status |
+| `GET` | `/status` | Report whether the Atlas vector index is ready |
 | `GET` | `/database/status` | Ping MongoDB and report connection status |
 
 Profile, account data, dashboard, and chat-history endpoints require a valid
@@ -275,6 +282,8 @@ credentials in frontend files or share the real `.env`.
 ```dotenv
 MONGODB_URI=mongodb+srv://<database-user>:<url-encoded-password>@<cluster-address>/
 MONGODB_DATABASE=devcompass
+MONGODB_VECTOR_COLLECTION=document_chunks
+MONGODB_VECTOR_INDEX=devcompass_vector
 
 # Configure at least one model provider:
 GEMINI_API_KEY=
@@ -287,6 +296,8 @@ Optional settings read by the current service:
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `EMBEDDING_MODEL` | Sentence Transformers model name | `all-MiniLM-L6-v2` |
+| `MONGODB_VECTOR_COLLECTION` | Atlas collection holding chunk vectors | `document_chunks` |
+| `MONGODB_VECTOR_INDEX` | Atlas Vector Search index name | `devcompass_vector` |
 | `GEMINI_MODEL` | Gemini model | `gemini-2.0-flash` |
 | `GROQ_MODEL` | Groq chat model | `llama-3.1-8b-instant` |
 | `OPENROUTER_MODEL` | OpenRouter chat model | `openai/gpt-4o-mini` |
@@ -345,8 +356,9 @@ connection string. The running API's database status is available at
 ## Dependencies and development checks
 
 `other/requirements.txt` declares the Python runtime packages for the API,
-MongoDB, PDF parsing, local embeddings, and ChromaDB. The frontend uses React
-and esbuild, with its npm dependencies declared in `frontend/package.json`.
+MongoDB, PDF parsing, local embeddings, and the temporary Chroma mirror. The
+frontend uses React and esbuild, with its npm dependencies declared in
+`frontend/package.json`.
 
 Run the unit tests from the project root:
 

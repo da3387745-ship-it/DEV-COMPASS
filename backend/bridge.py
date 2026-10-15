@@ -9,6 +9,7 @@ import secrets
 import shutil
 import threading
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 import time
 
@@ -22,6 +23,7 @@ from openai import OpenAI
 from pydantic import BaseModel
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
+from pymongo.operations import ReplaceOne
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
@@ -81,6 +83,7 @@ SESSION_COOKIE = 'devcompass_session'
 GUEST_COOKIE = 'devcompass_guest'
 SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7
 PASSWORD_HASH_ITERATIONS = 310_000
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 def get_mongo_client():
@@ -341,6 +344,15 @@ class RAGService:
         self._collection = None
         self._resource_lock = threading.Lock()
         self.collection_name = 'devcompass_documents'
+        self.vector_collection_name = os.getenv(
+            'MONGODB_VECTOR_COLLECTION',
+            'document_chunks',
+        ).strip() or 'document_chunks'
+        self.vector_index_name = os.getenv(
+            'MONGODB_VECTOR_INDEX',
+            'devcompass_vector',
+        ).strip() or 'devcompass_vector'
+        self.vector_dimensions = 384
         self.default_user_id = os.getenv('DEVCOMPASS_USER_ID', 'default-user')
         gemini_key = os.getenv('GEMINI_API_KEY')
         groq_key = os.getenv('GROQ_API_KEY')
@@ -388,21 +400,38 @@ class RAGService:
         """Use the requested workspace or this local install's default workspace."""
         return user_id or self.default_user_id
 
+    @property
+    def vector_collection(self):
+        """Return the Atlas collection containing persisted document chunks."""
+        return mongo_database()[self.vector_collection_name]
+
     def active_document_id(self, user_id=None, document_id=None):
         """Choose the requested document, or the most recently changed source."""
         if document_id:
             return document_id
         scope_user = self.effective_user_id(user_id)
         documents = self.load_documents(user_id=scope_user)
-        if not documents:
-            return None
-        active_document = max(
-            documents,
-            key=lambda document: Path(document['path']).stat().st_mtime,
-        )
-        return self.document_id_for(
-            active_document['source'],
-            user_id=scope_user,
+        if documents:
+            active_document = max(
+                documents,
+                key=lambda document: Path(document['path']).stat().st_mtime,
+            )
+            return active_document['document_id']
+        if os.getenv('MONGODB_URI', '').strip():
+            active = self._mongo_document_metadata(scope_user).sort(
+                'updated_at',
+                -1,
+            ).limit(1)
+            document = next(iter(active), None)
+            if document:
+                return document['_id']
+        return None
+
+    def _mongo_document_metadata(self, user_id):
+        """Return Atlas file metadata scoped to one workspace."""
+        return mongo_database()['user_documents'].find(
+            {'user_id': user_id},
+            {'filename': 1, 'updated_at': 1},
         )
 
     def read_document(self, path: Path) -> str:
@@ -412,6 +441,13 @@ class RAGService:
             text = '\n'.join(page.extract_text() or '' for page in reader.pages)
             return text.strip()
         return path.read_text(encoding='utf-8', errors='ignore')
+
+    def read_uploaded_document(self, filename, contents):
+        """Extract text from an upload without relying on ephemeral host storage."""
+        if Path(filename).suffix.lower() == '.pdf':
+            reader = PdfReader(BytesIO(contents))
+            return '\n'.join(page.extract_text() or '' for page in reader.pages).strip()
+        return contents.decode('utf-8', errors='ignore')
 
     def load_documents(self, user_id=None):
         """Read supported source files from the local raw-data folder."""
@@ -465,11 +501,15 @@ class RAGService:
             start = max(end - overlap, start + 1)
         return chunks
 
-    def rebuild_index(self, user_id=None):
-        """Refresh the ChromaDB index from the files currently on disk."""
+    def rebuild_index(self, user_id=None, documents=None):
+        """Index source files in Chroma and Atlas without replacing other files."""
         scope_user = self.effective_user_id(user_id)
 
-        documents = self.load_documents(user_id=scope_user)
+        documents = (
+            self.load_documents(user_id=scope_user)
+            if documents is None
+            else documents
+        )
         chunks = []
         for document in documents:
             for number, text in enumerate(self.chunk_text(document['text'])):
@@ -484,30 +524,110 @@ class RAGService:
                     'chunk': number,
                 })
 
+        embeddings = []
+        if chunks:
+            embeddings = self.embedding_model.encode([item['text'] for item in chunks])
+            if hasattr(embeddings, 'tolist'):
+                embeddings = embeddings.tolist()
+
+        atlas_collection = None
+        if os.getenv('MONGODB_URI', '').strip():
+            if any(len(embedding) != self.vector_dimensions for embedding in embeddings):
+                raise ValueError(
+                    'The configured embedding model must produce '
+                    f'{self.vector_dimensions}-dimensional vectors for Atlas Vector Search.'
+                )
+            atlas_collection = self.vector_collection
+            operations = [
+                ReplaceOne(
+                    {'_id': item['id']},
+                    {
+                        '_id': item['id'],
+                        'embedding': [float(value) for value in embedding],
+                        'text': item['text'],
+                        'source': item['source'],
+                        'document_id': item['document_id'],
+                        'user_id': item['user_id'],
+                        'chunk': item['chunk'],
+                    },
+                    upsert=True,
+                )
+                for item, embedding in zip(chunks, embeddings)
+            ]
+            for start in range(0, len(operations), 100):
+                atlas_collection.bulk_write(
+                    operations[start:start + 100],
+                    ordered=False,
+                )
+
         existing_ids = self.collection.get(
             where={'user_id': {'$eq': scope_user}}
+            if documents is None
+            else {
+                '$and': [
+                    {'user_id': {'$eq': scope_user}},
+                    {'document_id': {'$in': [
+                        document['document_id'] for document in documents
+                    ]}},
+                ],
+            },
         ).get('ids', [])
         if existing_ids:
             self.collection.delete(ids=existing_ids)
 
+        if documents is None:
+            if atlas_collection is not None:
+                atlas_collection.delete_many(
+                    {
+                        'user_id': scope_user,
+                        **(
+                            {'_id': {'$nin': [item['id'] for item in chunks]}}
+                            if chunks
+                            else {}
+                        ),
+                    }
+                )
+        elif atlas_collection is not None:
+            document_ids = [document['document_id'] for document in documents]
+            if document_ids:
+                atlas_collection.delete_many({
+                    'user_id': scope_user,
+                    'document_id': {'$in': document_ids},
+                    **(
+                        {'_id': {'$nin': [item['id'] for item in chunks]}}
+                        if chunks
+                        else {}
+                    ),
+                })
+
+        if chunks:
+            self.collection.upsert(
+                ids=[item['id'] for item in chunks],
+                documents=[item['text'] for item in chunks],
+                metadatas=[{
+                    'source': item['source'],
+                    'document_id': item['document_id'],
+                    'user_id': item['user_id'],
+                    'chunk': item['chunk'],
+                } for item in chunks],
+                embeddings=embeddings,
+            )
+        if atlas_collection is not None:
+            database = mongo_database()
+            for document in documents:
+                database['user_documents'].update_one(
+                    {'_id': document['document_id']},
+                    {'$set': {
+                        'user_id': scope_user,
+                        'filename': document['source'],
+                        'chunks': len(self.chunk_text(document['text'])),
+                        'updated_at': datetime.now(timezone.utc),
+                    }},
+                    upsert=True,
+                )
         if not chunks:
             return {'documents': len(documents), 'chunks': 0, 'document_id': None}
 
-        embeddings = self.embedding_model.encode([item['text'] for item in chunks])
-        if hasattr(embeddings, 'tolist'):
-            embeddings = embeddings.tolist()
-
-        self.collection.upsert(
-            ids=[item['id'] for item in chunks],
-            documents=[item['text'] for item in chunks],
-            metadatas=[{
-                'source': item['source'],
-                'document_id': item['document_id'],
-                'user_id': item['user_id'],
-                'chunk': item['chunk'],
-            } for item in chunks],
-            embeddings=embeddings,
-        )
         active_doc_id = self.active_document_id(user_id=scope_user)
         return {
             'documents': len(documents),
@@ -516,7 +636,7 @@ class RAGService:
         }
 
     def retrieve(self, question, limit=5, max_distance=2.0, user_id=None, document_id=None):
-        """Find the closest indexed passages inside the selected workspace."""
+        """Find relevant passages with Atlas, retaining Chroma as a fallback."""
         scope_user = self.effective_user_id(user_id)
         scope_filters = [{'user_id': {'$eq': scope_user}}]
         if document_id:
@@ -526,6 +646,51 @@ class RAGService:
         question_embedding = self.embedding_model.encode([question])
         if hasattr(question_embedding, 'tolist'):
             question_embedding = question_embedding.tolist()
+
+        if os.getenv('MONGODB_URI', '').strip():
+            try:
+                vector = [float(value) for value in question_embedding[0]]
+                if len(vector) != self.vector_dimensions:
+                    raise ValueError(
+                        'The configured embedding model must produce '
+                        f'{self.vector_dimensions}-dimensional vectors for Atlas Vector Search.'
+                    )
+                filter_query = {'user_id': {'$eq': scope_user}}
+                if document_id:
+                    filter_query['document_id'] = {'$eq': document_id}
+                atlas_result = list(self.vector_collection.aggregate([
+                    {'$vectorSearch': {
+                        'index': self.vector_index_name,
+                        'path': 'embedding',
+                        'queryVector': vector,
+                        'numCandidates': min(max(limit * 20, 100), 10000),
+                        'limit': limit,
+                        'filter': filter_query,
+                    }},
+                    {'$project': {
+                        'text': 1,
+                        'source': 1,
+                        'chunk': 1,
+                        'score': {'$meta': 'vectorSearchScore'},
+                    }},
+                ]))
+                matches = []
+                for item in atlas_result:
+                    distance = 1 - float(item.get('score', 0))
+                    if distance <= max_distance:
+                        matches.append({
+                            'text': item.get('text', ''),
+                            'source': item.get('source', 'unknown'),
+                            'chunk': item.get('chunk', 0),
+                            'distance': round(distance, 4),
+                        })
+                if matches:
+                    return matches
+            except (PyMongoError, HTTPException) as error:
+                logger.warning(
+                    'Atlas Vector Search failed; falling back to local Chroma (%s).',
+                    type(error).__name__,
+                )
 
         debug_retrieval(
             f'collection={self.collection_name} user_id={scope_user} '
@@ -564,12 +729,39 @@ class RAGService:
         return matches
 
     def retrieve_all_documents(self, user_id=None, document_id=None):
-        """Return all indexed passages for broad questions about a file."""
+        """Return passages from Atlas, falling back to the local Chroma index."""
         scope_user = self.effective_user_id(user_id)
         scope_filters = [{'user_id': {'$eq': scope_user}}]
         if document_id:
             scope_filters.append({'document_id': {'$eq': document_id}})
         scope = {'$and': scope_filters}
+
+        if os.getenv('MONGODB_URI', '').strip():
+            try:
+                documents = self.vector_collection.find(
+                    {
+                        'user_id': scope_user,
+                        **({'document_id': document_id} if document_id else {}),
+                    },
+                    {'text': 1, 'source': 1, 'chunk': 1},
+                ).sort('chunk', 1).limit(5)
+                matches = [
+                    {
+                        'text': item['text'],
+                        'source': item.get('source', 'unknown'),
+                        'chunk': item.get('chunk', 0),
+                        'distance': 0,
+                    }
+                    for item in documents
+                    if item.get('text')
+                ]
+                if matches:
+                    return matches
+            except (PyMongoError, HTTPException) as error:
+                logger.warning(
+                    'Could not read Atlas document chunks; falling back to local Chroma (%s).',
+                    type(error).__name__,
+                )
 
         result = self.collection.get(include=['documents', 'metadatas'], where=scope)
         documents = result.get('documents', [])
@@ -608,9 +800,6 @@ class RAGService:
             if score:
                 scored.append((score, document))
 
-        if not scored:
-            return []
-
         results = []
         ranked_documents = sorted(
             scored,
@@ -631,6 +820,38 @@ class RAGService:
                     )
                     if len(results) >= limit:
                         return results
+        if results or not os.getenv('MONGODB_URI', '').strip():
+            return results
+
+        try:
+            atlas_chunks = self.vector_collection.find(
+                {
+                    'user_id': scope_user,
+                    **({'document_id': document_id} if document_id else {}),
+                },
+                {'text': 1, 'source': 1, 'chunk': 1},
+            )
+            matching_chunks = []
+            for item in atlas_chunks:
+                text = item.get('text', '')
+                score = sum(1 for word in question_words if word in text.lower())
+                if score:
+                    matching_chunks.append((score, item))
+            matching_chunks.sort(
+                key=lambda result: result[0],
+                reverse=True,
+            )
+            return [{
+                'text': item['text'],
+                'source': item.get('source', 'unknown'),
+                'chunk': item.get('chunk', 0),
+                'distance': 0,
+            } for _, item in matching_chunks[:limit]]
+        except (PyMongoError, HTTPException) as error:
+            logger.warning(
+                'Atlas keyword fallback failed (%s).',
+                type(error).__name__,
+            )
         return results
 
     def build_prompt(self, question, matches, response_style='concise'):
@@ -798,7 +1019,25 @@ class RAGService:
         scope_user = self.effective_user_id(user_id)
         documents = self.load_documents(user_id=scope_user)
         if not documents:
-            return []
+            if not os.getenv('MONGODB_URI', '').strip():
+                return []
+            indexed_documents = list(
+                self._mongo_document_metadata(scope_user).sort('updated_at', -1)
+            )
+            if not indexed_documents:
+                return []
+            selected = next(
+                (
+                    item for item in indexed_documents
+                    if item.get('_id') == document_id
+                    or item.get('filename', '').lower() in question.lower()
+                ),
+                indexed_documents[0],
+            )
+            return self.retrieve_all_documents(
+                user_id=scope_user,
+                document_id=document_id or selected['_id'],
+            )
 
         active_document = None
         requested_document = document_id or self.active_document_id(user_id=user_id)
@@ -1115,7 +1354,13 @@ def delete_account(payload: PasswordConfirmRequest, request: Request, response: 
     database = mongo_database()
     try:
         database['sessions'].delete_many({'user_id': user_id})
-        for collection in ('chat_sessions', 'chat_history', 'activity', 'user_documents'):
+        for collection in (
+            'chat_sessions',
+            'chat_history',
+            'activity',
+            'user_documents',
+            rag_service.vector_collection_name,
+        ):
             database[collection].delete_many({'user_id': user_id})
         database['users'].delete_one({'_id': user_id})
         user_directory = RAW_DIR / safe_user_folder(user_id)
@@ -1314,26 +1559,67 @@ def list_documents(request: Request):
     """List the current user's source files for the chat library."""
     user = request_user(request)
     user_id = user['_id'] if user else guest_workspace_id(request)
-    documents = rag_service.load_documents(user_id=user_id)
+    documents = {
+        item['document_id']: {
+            'filename': item['source'],
+            'document_id': item['document_id'],
+        }
+        for item in rag_service.load_documents(user_id=user_id)
+    }
+    if os.getenv('MONGODB_URI', '').strip():
+        for item in rag_service._mongo_document_metadata(user_id).sort(
+            'updated_at',
+            -1,
+        ):
+            documents.setdefault(item['_id'], {
+                'filename': item.get('filename', 'Document'),
+                'document_id': item['_id'],
+            })
     active_document_id = rag_service.active_document_id(user_id=user_id)
     return {
         'documents': [{
-            'filename': item['source'],
-            'document_id': item['document_id'],
+            **item,
             'active': item['document_id'] == active_document_id,
-        } for item in documents],
+        } for item in documents.values()],
     }
 
 
 @app.get('/status')
 def status():
-    """Refresh the local index and report whether the RAG API is ready."""
+    """Report vector search readiness without re-embedding files on a GET."""
+    if not os.getenv('MONGODB_URI', '').strip():
+        return {
+            'ok': True,
+            'vector_search': 'not_configured',
+            'message': 'Using the local Chroma document index.',
+        }
     try:
-        rag_service.rebuild_index()
-        return {'ok': True, 'message': 'RAG service ready'}
-    except Exception:
-        logger.exception('The document service is unavailable.')
-        return {'ok': False, 'message': 'Document service is temporarily unavailable.'}
+        indexes = list(rag_service.vector_collection.list_search_indexes())
+    except PyMongoError as error:
+        logger.warning('Could not check Atlas Vector Search readiness (%s).', type(error).__name__)
+        return {
+            'ok': False,
+            'vector_search': 'unavailable',
+            'message': 'Atlas Vector Search is temporarily unavailable.',
+        }
+    index = next(
+        (
+            item for item in indexes
+            if item.get('name') == rag_service.vector_index_name
+            and item.get('type') == 'vectorSearch'
+        ),
+        None,
+    )
+    ready = bool(index and index.get('status') == 'READY' and index.get('queryable', True))
+    return {
+        'ok': ready,
+        'vector_search': 'ready' if ready else 'index_not_ready',
+        'message': (
+            'Atlas Vector Search is ready.'
+            if ready
+            else 'The Atlas Vector Search index is not ready.'
+        ),
+    }
 
 
 @app.get('/database/status')
@@ -1420,40 +1706,49 @@ def ask(payload: AskRequest, request: Request):
 
 @app.post('/upload')
 async def upload(request: Request, file: UploadFile = File(...)):
-    """Save a supported upload locally and add it to the ChromaDB index."""
+    """Save a supported upload and index its chunks in Atlas and local Chroma."""
     allowed = {'.pdf', '.txt', '.md'}
     filename = clean_filename(file.filename)
     if Path(filename).suffix.lower() not in allowed:
         raise HTTPException(status_code=400, detail='Only PDF, TXT, and Markdown files are supported.')
+    contents = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail='Files must be 10 MB or smaller.',
+        )
 
     user = request_user(request)
     scope_user = user['_id'] if user else guest_workspace_id(request)
-    user_directory = RAW_DIR / safe_user_folder(scope_user)
-    user_directory.mkdir(parents=True, exist_ok=True)
-    destination = user_directory / filename
     try:
-        with destination.open('wb') as output:
-            shutil.copyfileobj(file.file, output)
         rag_service.default_user_id = scope_user
-        indexed = rag_service.rebuild_index(user_id=scope_user)
+        document_id = rag_service.document_id_for(filename, user_id=scope_user)
+        indexed = rag_service.rebuild_index(
+            user_id=scope_user,
+            documents=[{
+                'source': filename,
+                'text': rag_service.read_uploaded_document(filename, contents),
+                'user_id': scope_user,
+                'document_id': document_id,
+            }],
+        )
+        database = mongo_database()
+        database['user_documents'].update_one(
+            {'_id': document_id},
+            {'$set': {
+                'user_id': scope_user,
+                'filename': filename,
+                'chunks': indexed['chunks'],
+                'updated_at': datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
         if user:
-            database = mongo_database()
-            document_id = rag_service.document_id_for(filename, user_id=scope_user)
-            database['user_documents'].update_one(
-                {'_id': document_id},
-                {'$set': {
-                    'user_id': scope_user,
-                    'filename': filename,
-                    'chunks': len(rag_service.chunk_text(rag_service.read_document(destination))),
-                    'updated_at': datetime.now(timezone.utc),
-                }},
-                upsert=True,
-            )
             record_activity(scope_user, 'upload', filename, 'Ready to use in chat')
         return {
             'ok': True,
             'filename': filename,
-            'document_id': rag_service.document_id_for(filename, user_id=scope_user),
+            'document_id': document_id,
         }
     except PyMongoError as error:
         raise HTTPException(

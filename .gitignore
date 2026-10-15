@@ -11,3 +11,5 @@ frontend/dist/
 backend/data/raw/*
 !backend/data/raw/.gitkeep
 backend/storage/chroma/
+/problems.md
+/NearBuy Final Report.pdf

@@ -1,9 +1,10 @@
 """Tests for account and document isolation in local RAG retrieval."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from backend import bridge
 
@@ -44,6 +45,10 @@ class FakeCollection:
             if '$eq' in condition and value != condition['$eq']:
                 return False
             if '$ne' in condition and value == condition['$ne']:
+                return False
+            if '$in' in condition and value not in condition['$in']:
+                return False
+            if '$nin' in condition and value in condition['$nin']:
                 return False
         return True
 
@@ -111,6 +116,8 @@ class FakePersistentClient:
 
 class RetrievalScopeTest(unittest.TestCase):
     def setUp(self):
+        self.mongo_environment = patch.dict(os.environ, {'MONGODB_URI': ''})
+        self.mongo_environment.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.raw_dir = Path(self.temp_dir.name) / 'raw'
         user_dir = self.raw_dir / 'user-1'
@@ -142,6 +149,7 @@ class RetrievalScopeTest(unittest.TestCase):
         for patcher in reversed(self.patches):
             patcher.stop()
         self.temp_dir.cleanup()
+        self.mongo_environment.stop()
 
     def test_query_scopes_to_active_document_and_user(self):
         rag = bridge.RAGService()
@@ -238,6 +246,95 @@ class RetrievalScopeTest(unittest.TestCase):
 
         embedding_factory.assert_not_called()
         chroma_factory.assert_not_called()
+
+    def test_rebuild_writes_document_chunks_to_atlas_and_keeps_chroma(self):
+        class AtlasEmbedding:
+            def encode(self, texts):
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        rag = bridge.RAGService()
+        rag._embedding_model = AtlasEmbedding()
+        chroma_query = Mock()
+        rag.collection.query = chroma_query
+        atlas_chunks = MagicMock()
+        user_documents = MagicMock()
+        database = MagicMock()
+        database.__getitem__.side_effect = lambda name: {
+            'document_chunks': atlas_chunks,
+            'user_documents': user_documents,
+        }[name]
+        with patch.dict(os.environ, {'MONGODB_URI': 'mongodb://test.invalid'}), \
+                patch.object(bridge, 'mongo_database', return_value=database):
+            result = rag.rebuild_index(user_id='user-1')
+
+        self.assertGreater(result['chunks'], 0)
+        atlas_chunks.bulk_write.assert_called_once()
+        atlas_chunks.delete_many.assert_called_once()
+        self.assertGreater(len(rag.collection.items), 0)
+        user_documents.update_one.assert_called()
+
+    def test_atlas_vector_retrieval_prefilters_by_user_and_document(self):
+        class AtlasEmbedding:
+            def encode(self, texts):
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        rag = bridge.RAGService()
+        rag._embedding_model = AtlasEmbedding()
+        chroma_query = Mock()
+        rag.collection.query = chroma_query
+        atlas_chunks = MagicMock()
+        atlas_chunks.aggregate.return_value = [{
+            'text': 'Atlas stores semantically indexed documentation.',
+            'source': 'notes.txt',
+            'chunk': 2,
+            'score': 0.95,
+        }]
+        database = MagicMock()
+        database.__getitem__.return_value = atlas_chunks
+        with patch.dict(os.environ, {'MONGODB_URI': 'mongodb://test.invalid'}), \
+                patch.object(bridge, 'mongo_database', return_value=database):
+            matches = rag.retrieve(
+                'How does Atlas search?',
+                user_id='user-1',
+                document_id='doc-1',
+            )
+
+        self.assertEqual(matches[0]['source'], 'notes.txt')
+        self.assertEqual(matches[0]['chunk'], 2)
+        pipeline = atlas_chunks.aggregate.call_args.args[0]
+        self.assertEqual(pipeline[0]['$vectorSearch']['index'], 'devcompass_vector')
+        self.assertEqual(
+            pipeline[0]['$vectorSearch']['filter'],
+            {
+                'user_id': {'$eq': 'user-1'},
+                'document_id': {'$eq': 'doc-1'},
+            },
+        )
+        chroma_query.assert_not_called()
+
+    def test_atlas_vector_retrieval_falls_back_to_chroma_when_no_match(self):
+        class AtlasEmbedding:
+            def encode(self, texts):
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        rag = bridge.RAGService()
+        rag._embedding_model = AtlasEmbedding()
+        chroma_query = Mock(return_value={
+            'documents': [['local passage']],
+            'metadatas': [[{'source': 'local.txt', 'chunk': 0}]],
+            'distances': [[0.25]],
+        })
+        rag.collection.query = chroma_query
+        atlas_chunks = MagicMock()
+        atlas_chunks.aggregate.return_value = []
+        database = MagicMock()
+        database.__getitem__.return_value = atlas_chunks
+        with patch.dict(os.environ, {'MONGODB_URI': 'mongodb://test.invalid'}), \
+                patch.object(bridge, 'mongo_database', return_value=database):
+            matches = rag.retrieve('query', user_id='user-1')
+
+        self.assertEqual(matches[0]['source'], 'local.txt')
+        chroma_query.assert_called_once()
 
     def test_unreadable_documents_are_logged_without_skipping_other_files(self):
         rag = bridge.RAGService()

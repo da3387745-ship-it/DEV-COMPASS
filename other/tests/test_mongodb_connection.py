@@ -1,8 +1,10 @@
 import os
 import unittest
+from io import BytesIO
 from unittest.mock import MagicMock, Mock, patch
 
 from fastapi import HTTPException, Response
+from fastapi import UploadFile
 from pymongo.errors import ServerSelectionTimeoutError
 
 from backend import bridge, check_mongodb_connection
@@ -290,6 +292,20 @@ class MongoDBConnectionTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn('secret.example.invalid', raised.exception.detail)
+
+
+class UploadLimitTest(unittest.IsolatedAsyncioTestCase):
+    async def test_upload_rejects_files_over_the_configured_limit(self):
+        upload = UploadFile(
+            filename='too-large.txt',
+            file=BytesIO(b'x' * (bridge.MAX_UPLOAD_BYTES + 1)),
+        )
+        with patch.object(bridge, 'request_user') as request_user:
+            with self.assertRaises(HTTPException) as raised:
+                await bridge.upload(Mock(), upload)
+
+        self.assertEqual(raised.exception.status_code, 413)
+        request_user.assert_not_called()
 
 
 if __name__ == '__main__':
