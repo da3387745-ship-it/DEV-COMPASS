@@ -821,6 +821,23 @@ function createThinkingPanel() {
   return { element: details, update, finish }
 }
 
+async function readUploadResponse(response) {
+  const body = await response.text()
+  let data = null
+  if (body.trim()) {
+    try {
+      data = JSON.parse(body)
+    } catch {
+      if (!response.ok) throw new Error(body.slice(0, 240))
+      throw new Error(`The server returned an invalid response (HTTP ${response.status}).`)
+    }
+  }
+  if (!response.ok) {
+    throw new Error(data?.detail || `Upload failed (HTTP ${response.status}).`)
+  }
+  if (!data) throw new Error(`The server returned an empty response (HTTP ${response.status}).`)
+  return data
+}
 function createUploadProgress(file) {
   const message = document.createElement('div')
   message.className = 'upload-composer-card'
@@ -1451,10 +1468,12 @@ document.addEventListener('change', async (event) => {
   const form = new FormData()
   form.append('file', file)
   try {
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error('Files must be 10 MB or smaller.')
+    }
     await ensureGuestSession()
     const response = await apiFetch('/upload', { method: 'POST', body: form })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.detail || 'Upload failed')
+    const data = await readUploadResponse(response)
     activeDocument = {
       filename: data.filename,
       documentId: data.document_id || data.filename,
