@@ -72,6 +72,7 @@ app.add_middleware(
         'http://localhost:8001',
         'http://127.0.0.1:8001',
         'null',
+        'https://dev-compass-1.onrender.com',
     ],
     allow_credentials=True,
     allow_methods=['*'],
@@ -84,6 +85,19 @@ GUEST_COOKIE = 'devcompass_guest'
 SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7
 PASSWORD_HASH_ITERATIONS = 310_000
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def secure_cookies_enabled():
+    """Use secure cookies by default on Render, while allowing local overrides."""
+    configured_value = os.getenv('DEVCOMPASS_COOKIE_SECURE')
+    if configured_value is None:
+        return os.getenv('RENDER', '').lower() == 'true'
+    return configured_value.lower() in {'1', 'true', 'yes', 'on'}
+
+
+def session_cookie_samesite():
+    """Allow cross-origin HTTPS frontend requests in production."""
+    return 'none' if secure_cookies_enabled() else 'lax'
 
 
 def get_mongo_client():
@@ -173,14 +187,14 @@ def create_login_session(user, response):
         'created_at': datetime.now(timezone.utc),
         'expires_at': datetime.now(timezone.utc) + timedelta(seconds=SESSION_LIFETIME_SECONDS),
     })
-    secure_cookie = os.getenv('DEVCOMPASS_COOKIE_SECURE', '0').lower() in {'1', 'true', 'yes', 'on'}
+    secure_cookie = secure_cookies_enabled()
     response.set_cookie(
         SESSION_COOKIE,
         token,
         max_age=SESSION_LIFETIME_SECONDS,
         httponly=True,
         secure=secure_cookie,
-        samesite='lax',
+        samesite=session_cookie_samesite(),
         path='/',
     )
 
@@ -1263,7 +1277,13 @@ def logout(request: Request, response: Response):
             })
         except PyMongoError as error:
             raise HTTPException(status_code=503, detail='Could not end the account session.') from error
-    response.delete_cookie(SESSION_COOKIE, httponly=True, samesite='lax', path='/')
+    response.delete_cookie(
+        SESSION_COOKIE,
+        httponly=True,
+        secure=secure_cookies_enabled(),
+        samesite=session_cookie_samesite(),
+        path='/',
+    )
     return {'ok': True}
 
 
@@ -1275,8 +1295,8 @@ def create_guest_session(request: Request, response: Response):
             secrets.token_urlsafe(32),
             max_age=SESSION_LIFETIME_SECONDS,
             httponly=True,
-            secure=os.getenv('DEVCOMPASS_COOKIE_SECURE', '0').lower() in {'1', 'true', 'yes', 'on'},
-            samesite='lax',
+            secure=secure_cookies_enabled(),
+            samesite=session_cookie_samesite(),
             path='/',
         )
     return {'ok': True}
@@ -1372,7 +1392,13 @@ def delete_account(payload: PasswordConfirmRequest, request: Request, response: 
             collection.delete(ids=indexed_ids)
     except (OSError, PyMongoError, ValueError) as error:
         raise HTTPException(status_code=503, detail='Could not completely delete this account.') from error
-    response.delete_cookie(SESSION_COOKIE, httponly=True, samesite='lax', path='/')
+    response.delete_cookie(
+        SESSION_COOKIE,
+        httponly=True,
+        secure=secure_cookies_enabled(),
+        samesite=session_cookie_samesite(),
+        path='/',
+    )
     return {'ok': True}
 
 

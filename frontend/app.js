@@ -7,10 +7,13 @@ let availableDocuments = []
 let editingTurn = null
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http'
 const API_HOST = window.location.hostname || '127.0.0.1'
-const API_BASE = window.location.protocol === 'file:'
+const renderBackendBase = window.location.hostname === 'dev-compass-1.onrender.com'
+  ? 'https://dev-compass.onrender.com'
+  : ''
+const API_BASE = renderBackendBase || (window.location.protocol === 'file:'
   || ['5173', '8001'].includes(window.location.port)
   ? `${API_PROTOCOL}://${API_HOST}:8000`
-  : window.location.origin
+  : window.location.origin)
 
 function apiFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, { ...options, credentials: 'include' })
