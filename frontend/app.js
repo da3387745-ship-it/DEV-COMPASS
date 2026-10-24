@@ -357,14 +357,17 @@ function accountPage(mode) {
   const confirmationField = isSignup
     ? `
       <label for="account-confirm">Confirm password</label>
-      <input
-        id="account-confirm"
-        type="password"
-        minlength="12"
-        maxlength="256"
-        autocomplete="new-password"
-        required
-      >
+      <div class="password-input-wrap">
+        <input
+          id="account-confirm"
+          type="password"
+          minlength="12"
+          maxlength="256"
+          autocomplete="new-password"
+          required
+        >
+        <button class="password-toggle" type="button" data-toggle-password="account-confirm" aria-label="Show confirmation password" aria-pressed="false">Show</button>
+      </div>
     `
     : ''
   const switchLabel = isSignup ? 'Already have an account?' : 'New to DevCompass?'
@@ -394,15 +397,18 @@ function accountPage(mode) {
             required
           >
           <label for="account-password">Password</label>
-          <input
-            id="account-password"
-            type="password"
-            placeholder="${passwordPlaceholder}"
-            minlength="${passwordMinLength}"
-            maxlength="256"
-            autocomplete="${passwordAutocomplete}"
-            required
-          >
+          <div class="password-input-wrap">
+            <input
+              id="account-password"
+              type="password"
+              placeholder="${passwordPlaceholder}"
+              minlength="${passwordMinLength}"
+              maxlength="256"
+              autocomplete="${passwordAutocomplete}"
+              required
+            >
+            <button class="password-toggle" type="button" data-toggle-password="account-password" aria-label="Show password" aria-pressed="false">Show</button>
+          </div>
           ${confirmationField}
           <button class="primary-button" type="submit">${action}</button>
           <p class="form-message" id="auth-message" role="alert" hidden></p>
@@ -1163,6 +1169,20 @@ async function sendChat() {
 }
 
 document.addEventListener('click', async (event) => {
+  const passwordToggle = event.target.closest('[data-toggle-password]')
+  if (passwordToggle) {
+    const passwordInput = document.getElementById(passwordToggle.dataset.togglePassword)
+    if (passwordInput) {
+      const isVisible = passwordInput.type === 'password'
+      passwordInput.type = isVisible ? 'text' : 'password'
+      passwordToggle.textContent = isVisible ? 'Hide' : 'Show'
+      passwordToggle.setAttribute('aria-pressed', String(isVisible))
+      passwordToggle.setAttribute(
+        'aria-label',
+        `${isVisible ? 'Hide' : 'Show'} ${passwordInput.id === 'account-confirm' ? 'confirmation password' : 'password'}`,
+      )
+    }
+  }
   const route = event.target.closest('[data-route]')
   if (route) go(route.dataset.route)
   if (event.target.closest('[data-send]')) sendChat()

@@ -1237,6 +1237,7 @@ def signup(payload: SignupRequest, response: Response):
             detail='An account with this email already exists.',
         ) from error
     except PyMongoError as error:
+        logger.error('MongoDB account signup failed (%s).', type(error).__name__)
         raise HTTPException(
             status_code=503,
             detail='Could not create the account in MongoDB.',
@@ -1258,6 +1259,7 @@ def login(payload: LoginRequest, response: Response):
     except HTTPException:
         raise
     except PyMongoError as error:
+        logger.error('MongoDB account login failed (%s).', type(error).__name__)
         raise HTTPException(status_code=503, detail='Could not log in using MongoDB.') from error
 
 
