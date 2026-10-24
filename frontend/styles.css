@@ -2808,11 +2808,23 @@ body.chat-page {
   border-radius: 12px;
   background: var(--muted);
 }
+.chat-page .attachment-preview.uploading {
+  display: block;
+  width: min(100%, 560px);
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 8px;
+  background: var(--muted);
+}
+.upload-composer-card {
+  width: 100%;
+}
 .upload-card {
   width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
 }
 .upload-progress {
   height: 3px;

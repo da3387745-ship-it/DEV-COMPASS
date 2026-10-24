@@ -823,7 +823,7 @@ function createThinkingPanel() {
 
 function createUploadProgress(file) {
   const message = document.createElement('div')
-  message.className = 'upload-event'
+  message.className = 'upload-composer-card'
   message.innerHTML = `
     <div class="upload-card">
       <div class="upload-file"><strong></strong><small></small></div>
@@ -1435,9 +1435,12 @@ document.addEventListener('change', async (event) => {
     previewSize.textContent = `${Math.ceil(file.size / 1024)} KB`
     preview.append(previewName, previewSize)
   }
-  document.querySelector('.welcome-message')?.remove()
   const message = createUploadProgress(file)
-  document.querySelector('#messages').append(message)
+  if (preview) {
+    preview.classList.add('uploading')
+    preview.replaceChildren(message)
+    preview.hidden = false
+  }
   let stageIndex = 0
   updateUploadProgress(message, stageIndex)
   const progressTimer = setInterval(() => {
@@ -1463,7 +1466,6 @@ document.addEventListener('change', async (event) => {
     failUploadProgress(message, error.message)
   } finally {
     clearInterval(progressTimer)
-    if (preview) preview.hidden = true
     event.target.value = ''
   }
 })
