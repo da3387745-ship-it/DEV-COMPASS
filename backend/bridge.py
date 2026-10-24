@@ -1760,4 +1760,5 @@ async def upload(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail='The file could not be added to your library.') from error
 
 
-app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
+if FRONTEND_DIR.is_dir():
+    app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
