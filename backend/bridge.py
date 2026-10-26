@@ -73,6 +73,7 @@ app.add_middleware(
         'http://127.0.0.1:8001',
         'null',
         'https://dev-compass-1.onrender.com',
+        'https://devcompass-frontend.onrender.com',
     ],
     allow_credentials=True,
     allow_methods=['*'],

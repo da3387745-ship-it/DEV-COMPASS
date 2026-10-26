@@ -1,15 +1,25 @@
 services:
   - type: web
-    name: devcompass
+    name: devcompass-frontend
+    runtime: static
+    buildCommand: npm ci --prefix frontend && npm run build --prefix frontend
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: DEVCOMPASS_API_BASE
+        value: https://dev-compass.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  - type: web
+    name: dev-compass
     runtime: python
-    plan: free
-    buildCommand: npm ci --prefix frontend && npm run build --prefix frontend && pip install -r other/requirements.txt
-    startCommand: uvicorn backend.bridge:app --host 0.0.0.0 --port $PORT
+    buildCommand: python -m pip install -r other/requirements.txt
+    startCommand: python -m uvicorn backend.bridge:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
-        value: 3.12.8
-      - key: DEVCOMPASS_COOKIE_SECURE
-        value: "1"
+        value: 3.11.11
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DATABASE
