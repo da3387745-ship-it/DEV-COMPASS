@@ -15,7 +15,7 @@ services:
   - type: web
     name: dev-compass
     runtime: python
-    buildCommand: python -m pip install -r other/requirements.txt
+    buildCommand: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1+cpu && python -m pip install -r other/requirements.txt
     startCommand: python -m uvicorn backend.bridge:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION

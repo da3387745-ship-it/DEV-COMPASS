@@ -1,5 +1,6 @@
 """Tests for account and document isolation in local RAG retrieval."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -167,6 +168,62 @@ class RetrievalScopeTest(unittest.TestCase):
 
         self.assertTrue(matches)
         self.assertEqual({match['source'] for match in matches}, {'doc_a.txt'})
+
+    def test_notebook_extraction_indexes_markdown_and_code_but_not_outputs(self):
+        notebook = {
+            'cells': [
+                {
+                    'cell_type': 'markdown',
+                    'source': ['# Project notes\n', 'The app uses vector search.'],
+                },
+                {
+                    'cell_type': 'code',
+                    'source': ['def retrieve():\n', '    return "Atlas"'],
+                    'outputs': [{'data': {'text/plain': 'secret runtime output'}}],
+                },
+            ],
+        }
+
+        text = bridge.RAGService().read_uploaded_document(
+            'rag-notes.ipynb',
+            json.dumps(notebook).encode('utf-8'),
+        )
+
+        self.assertIn('The app uses vector search.', text)
+        self.assertIn('def retrieve():', text)
+        self.assertNotIn('secret runtime output', text)
+
+    def test_notebook_extraction_reports_invalid_json(self):
+        with self.assertRaisesRegex(ValueError, 'not valid UTF-8 JSON'):
+            bridge.RAGService().read_uploaded_document(
+                'broken.ipynb',
+                b'not a notebook',
+            )
+
+    def test_notebook_question_uses_extracted_notebook_context(self):
+        rag = bridge.RAGService()
+        rag.default_user_id = 'user-1'
+        notebook = {
+            'cells': [
+                {'cell_type': 'markdown', 'source': ['Notebook about retrieval.']},
+                {'cell_type': 'code', 'source': ['def retrieve():\n', '    return "chunks"']},
+            ],
+        }
+        path = self.raw_dir / 'user-1' / 'retrieval.ipynb'
+        path.write_text(json.dumps(notebook), encoding='utf-8')
+        rag.rebuild_index(user_id='user-1')
+
+        with patch.object(rag, 'has_any_provider_key', return_value=True), \
+                patch.object(
+                    rag,
+                    'call_providers',
+                    return_value=('The notebook retrieves chunks.', 'gemini'),
+                ) as call_providers:
+            result = rag.ask('Explain this notebook', user_id='user-1')
+
+        self.assertEqual(result['mode'], 'rag')
+        self.assertEqual(result['sources'], ['retrieval.ipynb'])
+        self.assertIn('def retrieve():', call_providers.call_args.args[0])
 
     def test_general_knowledge_question_uses_chat_without_document_retrieval(self):
         rag = bridge.RAGService()

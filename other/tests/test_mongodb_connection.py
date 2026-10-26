@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from io import BytesIO
@@ -306,6 +307,54 @@ class UploadLimitTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 413)
         request_user.assert_not_called()
+
+    async def test_notebook_upload_indexes_notebook_source(self):
+        notebook = {
+            'cells': [{
+                'cell_type': 'code',
+                'source': ['def answer():\n', '    return "indexed"'],
+                'outputs': [],
+            }],
+        }
+        upload = UploadFile(
+            filename='notes.ipynb',
+            file=BytesIO(json.dumps(notebook).encode('utf-8')),
+        )
+        database = MagicMock()
+        with patch.object(bridge, 'request_user', return_value=None), \
+                patch.object(bridge, 'guest_workspace_id', return_value='guest-1'), \
+                patch.object(bridge.rag_service, 'default_user_id', 'default-user'), \
+                patch.object(
+                    bridge.rag_service,
+                    'rebuild_index',
+                    return_value={'chunks': 1},
+                ) as rebuild_index, \
+                patch.object(bridge, 'mongo_database', return_value=database):
+            result = await bridge.upload(Mock(), upload)
+
+        self.assertTrue(result['ok'])
+        indexed_document = rebuild_index.call_args.kwargs['documents'][0]
+        self.assertIn('def answer():', indexed_document['text'])
+        self.assertEqual(indexed_document['user_id'], 'guest-1')
+        database['user_documents'].update_one.assert_called_once()
+
+    async def test_pdf_without_extractable_text_is_rejected_before_indexing(self):
+        from pypdf import PdfWriter
+
+        pdf_bytes = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.write(pdf_bytes)
+        upload = UploadFile(filename='scanned.pdf', file=BytesIO(pdf_bytes.getvalue()))
+        with patch.object(bridge, 'request_user', return_value=None), \
+                patch.object(bridge, 'guest_workspace_id', return_value='guest-1'), \
+                patch.object(bridge.rag_service, 'rebuild_index') as rebuild_index:
+            with self.assertRaises(HTTPException) as raised:
+                await bridge.upload(Mock(), upload)
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn('OCR', raised.exception.detail)
+        rebuild_index.assert_not_called()
 
 
 if __name__ == '__main__':

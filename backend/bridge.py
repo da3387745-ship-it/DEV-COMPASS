@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -450,26 +451,52 @@ class RAGService:
         )
 
     def read_document(self, path: Path) -> str:
-        """Extract readable text from a PDF, text, or Markdown file."""
+        """Extract readable text from a supported document file."""
         if path.suffix.lower() == '.pdf':
             reader = PdfReader(str(path))
             text = '\n'.join(page.extract_text() or '' for page in reader.pages)
             return text.strip()
+        if path.suffix.lower() == '.ipynb':
+            return self.read_notebook(path.read_bytes())
         return path.read_text(encoding='utf-8', errors='ignore')
 
     def read_uploaded_document(self, filename, contents):
         """Extract text from an upload without relying on ephemeral host storage."""
-        if Path(filename).suffix.lower() == '.pdf':
+        suffix = Path(filename).suffix.lower()
+        if suffix == '.pdf':
             reader = PdfReader(BytesIO(contents))
             return '\n'.join(page.extract_text() or '' for page in reader.pages).strip()
+        if suffix == '.ipynb':
+            return self.read_notebook(contents)
         return contents.decode('utf-8', errors='ignore')
+
+    def read_notebook(self, contents):
+        """Extract Markdown and source code from a Jupyter notebook, ignoring outputs."""
+        try:
+            notebook = json.loads(contents.decode('utf-8-sig'))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError('The Jupyter notebook is not valid UTF-8 JSON.') from error
+        if not isinstance(notebook, dict) or not isinstance(notebook.get('cells'), list):
+            raise ValueError('The Jupyter notebook does not contain a valid cells list.')
+
+        extracted_cells = []
+        for index, cell in enumerate(notebook['cells'], start=1):
+            if not isinstance(cell, dict) or cell.get('cell_type') not in {'markdown', 'code'}:
+                continue
+            source = cell.get('source', '')
+            if isinstance(source, list):
+                source = ''.join(part for part in source if isinstance(part, str))
+            if isinstance(source, str) and source.strip():
+                label = 'Markdown' if cell['cell_type'] == 'markdown' else 'Code'
+                extracted_cells.append(f'[{label} cell {index}]\n{source.strip()}')
+        return '\n\n'.join(extracted_cells)
 
     def load_documents(self, user_id=None):
         """Read supported source files from the local raw-data folder."""
         files = sorted(
             path
             for path in RAW_DIR.rglob('*')
-            if path.suffix.lower() in {'.pdf', '.txt', '.md'}
+            if path.suffix.lower() in {'.pdf', '.txt', '.md', '.ipynb'}
         )
         if user_id:
             user_directory = RAW_DIR / safe_user_folder(user_id)
@@ -972,7 +999,8 @@ class RAGService:
         """Route explicit file and project questions to retrieval."""
         document_terms = {
             'document', 'documents', 'doc', 'docs', 'file', 'files', 'pdf',
-            'markdown', 'readme', 'source', 'citation', 'citations', 'repo',
+            'notebook', 'notebooks', 'jupyter', 'markdown', 'readme', 'source',
+            'citation', 'citations', 'repo',
             'repository', 'codebase', 'uploaded', 'attached', 'attachment',
         }
         project_phrases = {
@@ -995,6 +1023,8 @@ class RAGService:
 
         file_reference_patterns = (
             'this pdf', 'that pdf', 'given pdf', 'uploaded pdf', 'attached pdf',
+            'this notebook', 'that notebook', 'uploaded notebook',
+            'attached notebook', 'this jupyter notebook', 'that jupyter notebook',
             'this file', 'that file', 'given file', 'uploaded file', 'attached file',
             'this document', 'that document', 'given document', 'uploaded document',
             'this doc', 'that doc', 'given doc', 'uploaded doc', 'attached doc',
@@ -1013,7 +1043,7 @@ class RAGService:
             return True
 
         question_tokens = re.findall(r'[a-z0-9]+', question_lower)
-        file_terms = {'file', 'pdf', 'document', 'doc', 'report'}
+        file_terms = {'file', 'pdf', 'document', 'doc', 'report', 'notebook', 'jupyter'}
         if 'explain' in question_tokens and any(
             token in file_terms for token in question_tokens
         ):
@@ -1736,10 +1766,13 @@ def ask(payload: AskRequest, request: Request):
 @app.post('/upload')
 async def upload(request: Request, file: UploadFile = File(...)):
     """Save a supported upload and index its chunks in Atlas and local Chroma."""
-    allowed = {'.pdf', '.txt', '.md'}
+    allowed = {'.pdf', '.txt', '.md', '.ipynb'}
     filename = clean_filename(file.filename)
     if Path(filename).suffix.lower() not in allowed:
-        raise HTTPException(status_code=400, detail='Only PDF, TXT, and Markdown files are supported.')
+        raise HTTPException(
+            status_code=400,
+            detail='Only PDF, TXT, Markdown, and Jupyter Notebook files are supported.',
+        )
     contents = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -1750,13 +1783,30 @@ async def upload(request: Request, file: UploadFile = File(...)):
     user = request_user(request)
     scope_user = user['_id'] if user else guest_workspace_id(request)
     try:
+        text = rag_service.read_uploaded_document(filename, contents)
+    except (PdfReadError, ValueError) as error:
+        logger.info('Rejected unreadable upload %s (%s).', filename, type(error).__name__)
+        raise HTTPException(
+            status_code=422,
+            detail='Could not parse this file. Check that it is a valid PDF or Jupyter notebook.',
+        ) from error
+    if not text.strip():
+        detail = (
+            'This PDF contains no selectable text. Scanned/image-only PDFs need OCR, '
+            'which is not supported yet.'
+            if Path(filename).suffix.lower() == '.pdf'
+            else 'This file contains no readable text, Markdown, or notebook code cells.'
+        )
+        raise HTTPException(status_code=422, detail=detail)
+
+    try:
         rag_service.default_user_id = scope_user
         document_id = rag_service.document_id_for(filename, user_id=scope_user)
         indexed = rag_service.rebuild_index(
             user_id=scope_user,
             documents=[{
                 'source': filename,
-                'text': rag_service.read_uploaded_document(filename, contents),
+                'text': text,
                 'user_id': scope_user,
                 'document_id': document_id,
             }],
