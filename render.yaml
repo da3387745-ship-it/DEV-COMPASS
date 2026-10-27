@@ -15,11 +15,13 @@ services:
   - type: web
     name: dev-compass
     runtime: python
-    buildCommand: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1+cpu && python -m pip install -r other/requirements.txt
+    buildCommand: python -m pip install -r other/requirements.txt && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2', cache_dir='backend/storage/fastembed', threads=1)"
     startCommand: python -m uvicorn backend.bridge:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
+      - key: FASTEMBED_CACHE_PATH
+        value: backend/storage/fastembed
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DATABASE

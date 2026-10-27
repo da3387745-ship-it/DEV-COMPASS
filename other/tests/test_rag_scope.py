@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from backend import bridge
@@ -25,6 +26,11 @@ class FakeSentenceTransformer:
             else:
                 vectors.append([0.0, 0.0, 1.0])
         return vectors
+
+
+class FakeFastEmbeddingModel:
+    def __init__(self):
+        self.embed = Mock(return_value=[[0.25, 0.5, 0.75]])
 
 
 class FakeCollection:
@@ -113,6 +119,21 @@ class FakePersistentClient:
 
     def get_or_create_collection(self, name):
         return self._collection
+
+
+class EmbeddingFactoryTest(unittest.TestCase):
+    def test_embedding_factory_uses_cached_cpu_minilm_model(self):
+        constructor = Mock(return_value=Mock())
+        fake_fastembed = SimpleNamespace(TextEmbedding=constructor)
+        with patch.dict(os.environ, {'FASTEMBED_CACHE_PATH': 'model-cache'}), \
+                patch.dict('sys.modules', {'fastembed': fake_fastembed}):
+            bridge.create_embedding_model('all-MiniLM-L6-v2')
+
+        constructor.assert_called_once_with(
+            model_name='sentence-transformers/all-MiniLM-L6-v2',
+            cache_dir='model-cache',
+            threads=1,
+        )
 
 
 class RetrievalScopeTest(unittest.TestCase):
@@ -303,6 +324,17 @@ class RetrievalScopeTest(unittest.TestCase):
 
         embedding_factory.assert_not_called()
         chroma_factory.assert_not_called()
+
+    def test_fast_embedding_adapter_uses_bounded_cpu_batches(self):
+        model = FakeFastEmbeddingModel()
+
+        embeddings = bridge.FastEmbeddingModel(model).encode(['one passage'])
+
+        self.assertEqual(embeddings, [[0.25, 0.5, 0.75]])
+        model.embed.assert_called_once_with(
+            ['one passage'],
+            batch_size=16,
+        )
 
     def test_rebuild_writes_document_chunks_to_atlas_and_keeps_chroma(self):
         class AtlasEmbedding:

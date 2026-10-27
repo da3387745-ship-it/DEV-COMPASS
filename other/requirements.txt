@@ -1,5 +1,5 @@
 chromadb
-sentence-transformers
+fastembed
 pypdf
 google-genai
 groq

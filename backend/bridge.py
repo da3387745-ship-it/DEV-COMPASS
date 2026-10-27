@@ -44,10 +44,30 @@ def debug_retrieval(message):
 
 
 def create_embedding_model(model_name):
-    """Load the embedding dependency only when a RAG operation needs it."""
-    from sentence_transformers import SentenceTransformer
+    """Load the lightweight ONNX embedding model only when RAG needs it."""
+    from fastembed import TextEmbedding
 
-    return SentenceTransformer(model_name)
+    if model_name == 'all-MiniLM-L6-v2':
+        model_name = 'sentence-transformers/all-MiniLM-L6-v2'
+    return FastEmbeddingModel(TextEmbedding(
+        model_name=model_name,
+        cache_dir=os.getenv('FASTEMBED_CACHE_PATH'),
+        threads=1,
+    ))
+
+
+class FastEmbeddingModel:
+    """Keep the RAG service's encode interface while using CPU ONNX inference."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def encode(self, texts):
+        embeddings = self.model.embed(texts, batch_size=16)
+        return [
+            embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
+            for embedding in embeddings
+        ]
 
 
 def create_chroma_client(path):
