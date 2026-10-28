@@ -1,8 +1,16 @@
 # Base Files
 
-Copies of the backend and startup files used to configure and run DevCompass.
-Frontend source files are intentionally not included.
+Copies of the frontend, backend, and configuration files needed to build and
+run the complete DevCompass website.
 
+- `frontend/index.html`
+- `frontend/src/main.jsx`
+- `frontend/app.js`
+- `frontend/styles.css`
+- `frontend/build.mjs`
+- `frontend/package.json`
+- `frontend/package-lock.json`
+- `frontend/logo.png`
 - `backend/bridge.py`
 - `backend/__init__.py`
 - `other/requirements.txt`
