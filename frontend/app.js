@@ -590,7 +590,6 @@ function settings() {
             <img class="avatar profile-avatar" id="profile-avatar" src="logo.png" alt="Profile picture">
             <div>
               <strong>Profile picture</strong>
-              <small>PNG, JPEG, or WebP · up to 2 MB</small>
               <label class="secondary-button small" for="avatar-upload">Change photo</label>
               <input class="file-input" id="avatar-upload" type="file" accept="image/png,image/jpeg,image/webp">
             </div>
