@@ -1,22 +1,41 @@
-const routes = ['home', 'dashboard', 'chat', 'settings', 'docs', 'welcome', 'login', 'signup']
+import { Home } from './src/pages/Home.jsx'
+import { Welcome } from './src/pages/Welcome.jsx'
+import { AccountPage } from './src/pages/AccountPage.jsx'
+import { Dashboard } from './src/pages/Dashboard.jsx'
+import { Chat } from './src/pages/Chat.jsx'
+import { Settings } from './src/pages/Settings.jsx'
+
+const routes = ['home', 'dashboard', 'chat', 'settings', 'welcome', 'login', 'signup']
 let activeDocument = null
 let currentUser = null
 let chatHistoryEntries = []
 let activeChatId = null
 let availableDocuments = []
 let editingTurn = null
-const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http'
-const API_HOST = window.location.hostname || '127.0.0.1'
+const configuredApiBase = process.env.DEVCOMPASS_API_BASE.trim().replace(/\/+$/, '')
+const isNetlifySite = window.location.hostname.endsWith('.netlify.app')
 const renderBackendBase = window.location.hostname === 'dev-compass-1.onrender.com'
   ? 'https://dev-compass.onrender.com'
   : ''
-const API_BASE = renderBackendBase || (window.location.protocol === 'file:'
+const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http'
+const API_HOST = window.location.hostname || '127.0.0.1'
+const API_BASE = configuredApiBase || renderBackendBase || (window.location.protocol === 'file:'
   || ['5173', '8001'].includes(window.location.port)
   ? `${API_PROTOCOL}://${API_HOST}:8000`
   : window.location.origin)
 
 function apiFetch(path, options = {}) {
+  if (isNetlifySite && !configuredApiBase) {
+    throw new Error('Login is unavailable because the FastAPI backend is not connected to this Netlify site.')
+  }
   return fetch(`${API_BASE}${path}`, { ...options, credentials: 'include' })
+}
+
+async function readApiResponse(response) {
+  if (!response.headers.get('content-type')?.includes('application/json')) {
+    throw new Error(`The API returned a non-JSON response (HTTP ${response.status}). Check the backend URL and deployment.`)
+  }
+  return response.json()
 }
 
 async function ensureGuestSession() {
@@ -215,7 +234,7 @@ function currentPage() {
 }
 
 function header(activePage) {
-  const links = ['home', 'dashboard', 'chat', 'docs', 'settings']
+  const links = ['home', 'dashboard', 'chat', 'settings']
     .map((page) => {
       const activeClass = activePage === page ? 'active' : ''
       const label = page[0].toUpperCase() + page.slice(1)
@@ -244,7 +263,7 @@ function header(activePage) {
 function footer() {
   return `
     <footer class="site-footer">
-      <span>${icon('explore')} DevCompass · Answers grounded in your files</span>
+      <span>${icon('explore')} DevCompass · Project docs, easier to navigate</span>
     </footer>
   `
 }
@@ -254,420 +273,6 @@ function layout(content, active, plain = false) {
   const pageFooter = plain ? '' : footer()
   const pageClass = plain ? 'plain-page' : ''
   return `<div class="app ${pageClass}">${pageHeader}${content}${pageFooter}</div>`
-}
-
-function home() {
-  return layout(`
-    <main>
-      <section class="hero section">
-        <div class="container hero-grid">
-          <div class="hero-copy">
-            <span class="eyebrow" id="home-greeting"></span>
-            <span class="eyebrow">${icon('description')} Document Intelligence System</span>
-            <h1>Ask questions, get answers sourced from your own documents</h1>
-            <p>DevCompass indexes PDF, TXT, and Markdown files so you can ask questions about technical notes and guides, with source-file references when document text is used.</p>
-            <div class="button-row">
-              <button class="primary-button" data-route="${currentUser ? 'dashboard' : 'signup'}">
-                ${currentUser ? 'Open dashboard' : 'Get Started'} ${icon('arrow_forward')}
-              </button>
-              <button class="secondary-button" data-route="chat">
-                ${currentUser ? 'Open chat' : 'Try as guest'}
-              </button>
-              ${currentUser ? '' : '<button class="quiet-button" data-route="login">Log In</button>'}
-            </div>
-          </div>
-          <div class="preview panel">
-            <div class="panel-title"><span>${icon('menu_book')} Example</span><code>Document chat</code></div>
-            <div class="question"><label>Question:</label>What should I know from this document?</div>
-            <div class="answer">
-              <div class="answer-title"><span>${icon('description')} Document answer</span><code>Example only</code></div>
-              <p>Ask about an uploaded file and DevCompass will use its extracted text to prepare an answer.</p>
-              <code>Source-file references appear when available.</code>
-            </div>
-          </div>
-        </div>
-      </section>
-      <section class="section muted">
-        <div class="container">
-          <span class="eyebrow">HOW IT WORKS</span>
-          <h2>Three simple steps to document-grounded answers</h2>
-          <div class="steps">
-            <article class="step panel"><div class="icon-box">${icon('upload_file')}</div><h3>1. Upload</h3><p>Drop your PDF, TXT, or Markdown documents.</p></article>
-            <article class="step panel"><div class="icon-box blue">${icon('chat')}</div><h3>2. Ask</h3><p>Type natural language questions about your docs.</p></article>
-            <article class="step panel"><div class="icon-box ochre">${icon('fact_check')}</div><h3>3. Review the answer</h3><p>Document-based responses can show the source file they used.</p></article>
-          </div>
-        </div>
-      </section>
-      <section class="section">
-        <div class="container contact-band">
-          <div>
-            <span class="eyebrow">GET IN TOUCH</span>
-            <h2>Questions or feedback?</h2>
-            <p>I’d be happy to hear from you.</p>
-          </div>
-          <div class="contact-details footer-contact" aria-label="Contact details">
-            <a href="mailto:danis.techinican@gmail.com">
-              ${icon('mail')} danis.techinican@gmail.com
-            </a>
-            <a href="tel:9922770195">
-              ${icon('call')} 9922770195
-            </a>
-          </div>
-        </div>
-      </section>
-    </main>
-  `, 'home')
-}
-
-function welcome() {
-  return layout(`
-    <main class="auth-screen">
-      <section class="auth-welcome">
-        <img class="auth-brand-logo" src="logo.png" alt="DevCompass">
-        <span class="eyebrow">DOCUMENT INTELLIGENCE</span>
-        <h1>Your documents, easier to understand.</h1>
-        <p>Ask focused questions about your files and get answers grounded in their contents.</p>
-        <div class="auth-actions">
-          <button class="primary-button" data-route="login">Log in</button>
-          <button class="secondary-button" data-route="signup">Create account</button>
-        </div>
-        <div class="auth-divider"><span>or</span></div>
-        <button class="guest-button" data-route="chat">
-          Continue as guest ${icon('arrow_forward')}
-        </button>
-        <small class="auth-caption">Guest mode opens the document chat on this device.</small>
-      </section>
-    </main>
-  `, 'home', true)
-}
-
-function accountPage(mode) {
-  const isSignup = mode === 'signup'
-  const title = isSignup ? 'Create your account' : 'Welcome back'
-  const action = isSignup ? 'Create account' : 'Log in'
-  const signupFields = isSignup
-    ? `
-      <label for="account-name">Username</label>
-      <input id="account-name" type="text" maxlength="80" autocomplete="name" required>
-    `
-    : ''
-  const passwordPlaceholder = isSignup ? 'At least 12 characters' : 'Enter your password'
-  const passwordMinLength = isSignup ? '12' : '1'
-  const passwordAutocomplete = isSignup ? 'new-password' : 'current-password'
-  const confirmationField = isSignup
-    ? `
-      <label for="account-confirm">Confirm password</label>
-      <div class="password-input-wrap">
-        <input
-          id="account-confirm"
-          type="password"
-          minlength="12"
-          maxlength="256"
-          autocomplete="new-password"
-          required
-        >
-        <button class="password-toggle" type="button" data-toggle-password="account-confirm" aria-label="Show confirmation password" aria-pressed="false">Show</button>
-      </div>
-    `
-    : ''
-  const switchLabel = isSignup ? 'Already have an account?' : 'New to DevCompass?'
-  const switchRoute = isSignup ? 'login' : 'signup'
-  const switchAction = isSignup ? 'Log in' : 'Create an account'
-
-  return layout(`
-    <main class="auth-screen">
-      <section class="auth-card">
-        <button class="auth-back" data-route="welcome">${icon('arrow_back')} Back</button>
-        <img class="auth-brand-logo" src="logo.png" alt="DevCompass">
-        <span class="eyebrow">ACCOUNT ACCESS</span>
-        <h1>${title}</h1>
-        <p class="auth-subtitle">
-          ${isSignup
-            ? 'Create an account to save your profile, settings, and activity.'
-            : 'Log in to open your saved chats and files.'}
-        </p>
-        <form class="auth-form" id="account-form" data-auth-mode="${mode}">
-          ${signupFields}
-          <label for="account-email">Email</label>
-          <input
-            id="account-email"
-            type="email"
-            placeholder="you@example.com"
-            autocomplete="email"
-            required
-          >
-          <label for="account-password">Password</label>
-          <div class="password-input-wrap">
-            <input
-              id="account-password"
-              type="password"
-              placeholder="${passwordPlaceholder}"
-              minlength="${passwordMinLength}"
-              maxlength="256"
-              autocomplete="${passwordAutocomplete}"
-              required
-            >
-            <button class="password-toggle" type="button" data-toggle-password="account-password" aria-label="Show password" aria-pressed="false">Show</button>
-          </div>
-          ${confirmationField}
-          <button class="primary-button" type="submit">${action}</button>
-          <p class="form-message" id="auth-message" role="alert" hidden></p>
-        </form>
-        <p class="auth-note">
-          Your password is securely hashed on the backend; it is never stored as plain text.
-        </p>
-        <button class="secondary-button full" data-route="chat">
-          Continue as guest ${icon('arrow_forward')}
-        </button>
-        <p class="auth-switch">
-          ${switchLabel}
-          <button type="button" data-route="${switchRoute}">${switchAction}</button>
-        </p>
-      </section>
-    </main>
-  `, 'home', true)
-}
-
-function dashboard() {
-  const metrics = [
-    ['description', 'Indexed docs', 'metric-documents', 'Available in chat'],
-    ['forum', 'Questions sent', 'metric-queries', 'Saved to your account'],
-  ]
-  const metricCards = metrics.map(([symbol, label, id, note]) => `
-    <article class="stat panel">
-      <div class="stat-topline">
-        <span class="stat-icon">${icon(symbol)}</span>
-        <span class="stat-label">${label}</span>
-      </div>
-      <div class="stat-number" id="${id}">—</div>
-      <span class="stat-foot" id="${id}-note">${note}</span>
-    </article>
-  `).join('')
-
-  return layout(`
-    <main class="container page-content">
-      <div class="page-heading">
-        <div>
-          <span class="eyebrow">YOUR ACCOUNT</span>
-          <h1>Your library</h1>
-          <p>A calm overview of your documents and recent conversations.</p>
-        </div>
-        <button class="secondary-button" data-refresh-dashboard>
-          ${icon('refresh')} Refresh
-        </button>
-      </div>
-      <div class="stats">${metricCards}</div>
-      <div class="dashboard-columns">
-        <section class="activity">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">RECENT</span>
-              <h2>Recent activity</h2>
-            </div>
-            <span id="dashboard-activity-count">Account history</span>
-          </div>
-          <div class="activity-list panel" id="dashboard-activity">
-            <p class="empty-state">Your recent questions and uploads will appear here.</p>
-          </div>
-        </section>
-        <aside class="dashboard-side panel">
-          <span class="eyebrow">QUICK ACTION</span>
-          <h2>Keep working</h2>
-          <p>Ask a question against an indexed document or add another source.</p>
-          <button class="primary-button" data-route="chat">
-            Open document chat ${icon('arrow_forward')}
-          </button>
-          <button class="secondary-button" data-route="settings">Profile & settings</button>
-        </aside>
-      </div>
-    </main>
-  `, 'dashboard')
-}
-
-function library() {
-  return `
-    <aside class="library">
-      <button class="primary-button full" data-new-chat>
-        ${icon('edit_square')} New Chat
-      </button>
-      <span class="library-label history-label">
-        RECENT CHATS <b id="chat-history-count">—</b>
-      </span>
-      <div id="chat-history-list">
-        <p class="library-empty">Guest chats are not saved. Log in to keep your history.</p>
-      </div>
-      <button class="sidebar-profile" data-route="${currentUser ? 'settings' : 'login'}">
-        <span class="avatar avatar-small" id="sidebar-avatar">D</span>
-        <span><strong id="sidebar-username">Account</strong><small id="sidebar-profile-label">Profile & settings</small></span>
-        ${icon('settings')}
-      </button>
-    </aside>
-  `
-}
-
-function chat() {
-  return layout(`
-    <main class="chat-layout">
-      ${library()}
-      <section class="chat-main">
-        <div class="chat-head">
-          <div>
-            <span class="icon-box">${icon('auto_awesome')}</span>
-            <div>
-              <h1 id="chat-title">New chat</h1>
-              <small>Ask about your files or start anywhere.</small>
-            </div>
-          </div>
-          <button class="quiet-button" data-route="home">Home</button>
-          <button class="icon-button mobile-library-toggle" data-toggle-library aria-label="Toggle chat history">
-            ${icon('menu')}
-          </button>
-        </div>
-        <div class="messages" id="messages">
-          <div class="welcome-message">
-            <span class="icon-box">${icon('auto_awesome')}</span>
-            <h2>What would you like to explore?</h2>
-            <p>Ask a question or use @ to bring one of your files into the chat.</p>
-          </div>
-        </div>
-        <div class="composer">
-          <div class="composer-editing" id="edit-indicator" hidden>
-            <span>Editing your message</span>
-            <button type="button" data-cancel-edit>Cancel</button>
-          </div>
-          <div class="composer-box">
-            <div class="composer-document-row" data-document-context-row hidden>
-              <div class="document-context-block" id="active-document-context" hidden></div>
-              <button type="button" class="clear-document-button" data-clear-document aria-label="Clear selected file" title="Use all files">
-                ${icon('close')}
-              </button>
-            </div>
-            <div class="attachment-preview" id="attachment-preview" hidden></div>
-            <div class="mention-picker" id="mention-picker" hidden></div>
-            <input class="file-input" id="file-upload" type="file" accept=".pdf,.txt,.md">
-            <textarea
-              id="chat-input"
-              placeholder="Message DevCompass… use @ to choose a file"
-              rows="2"
-            ></textarea>
-            <div class="composer-tools">
-              <label class="attach-button" for="file-upload" title="Add a PDF, TXT, or Markdown file" aria-label="Add a file">
-                ${icon('add')}
-              </label>
-              <span class="composer-hint">Enter to send · Shift + Enter for a new line</span>
-              <button class="send-button" data-send aria-label="Send message">${icon('arrow_upward')}</button>
-            </div>
-          </div>
-        </div>
-      </section>
-    </main>
-  `, 'chat', true)
-}
-
-function settings() {
-  return layout(`
-    <main class="container page-content">
-      <div class="page-heading">
-        <div>
-          <span class="eyebrow">YOUR ACCOUNT</span>
-          <h1>Settings</h1>
-          <p>Make DevCompass feel like yours.</p>
-        </div>
-        <button class="secondary-button" data-refresh-settings>
-          ${icon('refresh')} Refresh
-        </button>
-      </div>
-      <div class="settings-cards">
-        <section class="settings-card panel profile-card">
-          <div class="settings-card-heading">
-            <span class="settings-icon">${icon('account_circle')}</span>
-            <div>
-              <span class="eyebrow">ACCOUNT</span>
-              <h2>Your profile</h2>
-            </div>
-          </div>
-          <div class="avatar-editor">
-            <img class="avatar profile-avatar" id="profile-avatar" src="logo.png" alt="Profile picture">
-            <div>
-              <strong>Profile picture</strong>
-              <label class="secondary-button small" for="avatar-upload">Change photo</label>
-              <input class="file-input" id="avatar-upload" type="file" accept="image/png,image/jpeg,image/webp">
-            </div>
-          </div>
-          <form class="profile-form" id="profile-form">
-            <label for="profile-display-name">Username</label>
-            <input id="profile-display-name" type="text" maxlength="80" autocomplete="nickname" required>
-            <label for="profile-email">Email</label>
-            <input id="profile-email" type="email" readonly>
-            <label for="profile-theme">Appearance</label>
-            <select id="profile-theme">
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-            <label for="profile-answer-style">Answer style</label>
-            <select id="profile-answer-style">
-              <option value="concise">Concise</option>
-              <option value="detailed">Detailed</option>
-            </select>
-            <button class="primary-button" type="submit">Save profile & settings</button>
-            <p class="form-message" id="profile-message" role="status" hidden></p>
-          </form>
-        </section>
-        <section class="settings-card panel index-card">
-          <div class="settings-card-heading">
-            <span class="settings-icon ochre">${icon('folder_data')}</span>
-            <div>
-              <span class="eyebrow">YOUR LIBRARY</span>
-              <h2>Files</h2>
-            </div>
-          </div>
-          <div class="index-summary">
-            <div>
-              <strong id="settings-document-count">—</strong>
-              <span>documents</span>
-            </div>
-          </div>
-          <p class="settings-note" id="settings-index-status">Your documents are ready when you are.</p>
-        </section>
-        <section class="settings-card panel danger-zone">
-          <div class="settings-card-heading">
-            <span class="settings-icon">${icon('manage_accounts')}</span>
-            <div>
-              <span class="eyebrow">ACCOUNT CONTROL</span>
-              <h2>Delete account</h2>
-            </div>
-          </div>
-          <p>This permanently removes your profile, files, and saved conversations.</p>
-          <form id="delete-account-form" class="delete-account-form">
-            <label for="delete-account-password">Confirm with your password</label>
-            <input id="delete-account-password" type="password" autocomplete="current-password" required>
-            <button class="danger-button" type="submit">Delete my account</button>
-            <p class="form-message" id="delete-account-message" role="status" hidden></p>
-          </form>
-        </section>
-      </div>
-    </main>
-  `, 'settings')
-}
-
-function docs() {
-  return layout(`
-    <main class="container page-content">
-      <div class="page-heading">
-        <div>
-          <span class="eyebrow">${icon('menu_book')} DOCUMENTATION</span>
-          <h1>Your document library</h1>
-          <p>
-            Add PDFs, text files, or Markdown in chat, then ask questions with
-            source references.
-          </p>
-        </div>
-        <button class="primary-button" data-route="chat">
-          Open document chat ${icon('arrow_forward')}
-        </button>
-      </div>
-    </main>
-  `, 'home')
 }
 
 function syncActiveDocumentUI() {
@@ -708,14 +313,13 @@ async function loadDocuments() {
 function render() {
   const page = currentPage()
   const pageRenderers = {
-    welcome,
-    login: () => accountPage('login'),
-    signup: () => accountPage('signup'),
-    dashboard,
-    chat,
-    settings,
-    docs,
-    home,
+    welcome: () => Welcome({ layout, icon }),
+    login: () => AccountPage('login', { layout, icon }),
+    signup: () => AccountPage('signup', { layout, icon }),
+    dashboard: () => Dashboard({ layout, icon }),
+    chat: () => Chat({ layout, icon, currentUser }),
+    settings: () => Settings({ layout, icon }),
+    home: () => Home({ layout, icon, currentUser }),
   }
 
   document.body.classList.toggle('chat-page', page === 'chat')
@@ -837,6 +441,7 @@ async function readUploadResponse(response) {
   if (!data) throw new Error(`The server returned an empty response (HTTP ${response.status}).`)
   return data
 }
+
 function createUploadProgress(file) {
   const message = document.createElement('div')
   message.className = 'upload-composer-card'
@@ -1199,6 +804,7 @@ document.addEventListener('click', async (event) => {
       )
     }
   }
+
   const route = event.target.closest('[data-route]')
   if (route) go(route.dataset.route)
   if (event.target.closest('[data-send]')) sendChat()
@@ -1341,7 +947,7 @@ document.addEventListener('submit', async (event) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const data = await response.json()
+      const data = await readApiResponse(response)
       if (!response.ok) throw new Error(data.detail || 'Account request failed.')
       currentUser = data.user
       activeChatId = null
