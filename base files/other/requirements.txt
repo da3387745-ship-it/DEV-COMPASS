@@ -1,0 +1,11 @@
+chromadb
+fastembed
+pypdf
+google-genai
+groq
+openai
+python-dotenv
+fastapi
+uvicorn
+python-multipart
+pymongo
